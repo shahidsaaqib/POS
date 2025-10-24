@@ -1,0 +1,2055 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pharmacy POS System (Supabase Integrated)</title>
+    
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+    <style>
+        /* General Styles */
+        body { background-color: #f4f7f6; }
+        .tabs button { margin-right: 5px; }
+        .screen { display: none; padding: 15px; }
+        .screen.active { display: block; }
+        
+        /* POS Specific */
+        .pos-sidebar { height: 85vh; overflow-y: auto; background-color: #ffffff; border-right: 1px solid #eee; }
+        .cart-section { height: 60vh; overflow-y: auto; }
+        .product-tile { cursor: pointer; border: 1px solid #ddd; padding: 10px; margin-bottom: 5px; transition: background-color 0.2s; }
+        .product-tile:hover { background-color: #f0f0f0; }
+        .reorder-needed { background-color: #ffe0e0; font-weight: bold; }
+        .expired-row { background-color: #ff9999 !important; color: white; }
+        .soon-to-expire-row { background-color: #ffedb5 !important; }
+        .low-stock-row { background-color: #f7f7f7; font-style: italic; }
+
+        /* Print Invoice Styles */
+        @media print {
+            body * { visibility: hidden; }
+            #print-area, #print-area * { visibility: visible; }
+            #print-area { 
+                position: absolute; 
+                left: 0; 
+                top: 0; 
+                width: 58mm; /* Standard thermal printer width */
+                font-family: monospace;
+                font-size: 10pt;
+                color: black;
+            }
+            .invoice-footer { text-align: center; margin-top: 15px; font-size: 8pt; }
+            .no-print { display: none !important; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container-fluid p-3">
+    
+    <div class="bg-white p-3 mb-3 rounded shadow-sm d-flex justify-content-between align-items-center">
+        <h3 class="mb-0 text-primary">PHARMACY POS DEMO</h3>
+        <div class="tabs">
+            <button class="btn btn-primary active" data-target="dashboard-screen"><i class="fas fa-home"></i> Dashboard</button>
+            <button class="btn btn-primary" data-target="pos-screen"><i class="fas fa-cash-register"></i> POS <span class="badge bg-warning ms-1" id="held-count">0</span></button>
+            <button class="btn btn-primary" data-target="inventory-screen"><i class="fas fa-warehouse"></i> Inventory</button>
+            <button class="btn btn-primary" data-target="purchase-screen"><i class="fas fa-shopping-cart"></i> Purchases</button>
+            <button class="btn btn-primary" data-target="expense-screen"><i class="fas fa-receipt"></i> Expenses</button>
+            <button class="btn btn-primary" data-target="reports-screen"><i class="fas fa-chart-line"></i> Reports</button>
+            <button class="btn btn-danger" onclick="showReturnModal()"><i class="fas fa-undo"></i> Return</button>
+        </div>
+    </div>
+    
+    <div id="sale-message"></div>
+
+    <div class="app-body">
+        
+        <div id="dashboard-screen" class="screen active">
+            <h4 class="mb-3">Dashboard Overview</h4>
+            <div class="d-flex justify-content-end mb-3">
+                <label for="dashboard-filter" class="form-label me-2">Filter:</label>
+                <select id="dashboard-filter" class="form-select form-select-sm" style="width: 150px;" onchange="renderDashboard()">
+                    <option value="day">Today</option>
+                    <option value="week">Last 7 Days</option>
+                    <option value="month">This Month</option>
+                </select>
+            </div>
+            
+            <div class="row g-3">
+                <div class="col-md-3">
+                    <div class="card bg-success text-white shadow dashboard-card" data-target="pos-screen">
+                        <div class="card-body">
+                            <h5 class="card-title">Sales (<span id="dashboard-period">Today</span>)</h5>
+                            <h2 class="display-6" id="dashboard-sales">0.00 PKR</h2>
+                            <p class="card-text"><i class="fas fa-arrow-up"></i> Total Revenue</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card bg-primary text-white shadow dashboard-card" data-target="reports-screen">
+                        <div class="card-body">
+                            <h5 class="card-title">Net Profit (<span id="dashboard-period-2">Today</span>)</h5>
+                            <h2 class="display-6" id="dashboard-profit">0.00 PKR</h2>
+                            <p class="card-text"><i class="fas fa-wallet"></i> After Expenses</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card bg-danger text-white shadow dashboard-card" data-target="expense-screen">
+                        <div class="card-body">
+                            <h5 class="card-title">Expenses (<span id="dashboard-period-3">Today</span>)</h5>
+                            <h2 class="display-6" id="dashboard-expenses">0.00 PKR</h2>
+                            <p class="card-text"><i class="fas fa-minus-circle"></i> Operating Costs</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card bg-warning text-dark shadow dashboard-card" data-target="inventory-screen">
+                        <div class="card-body">
+                            <h5 class="card-title">Inventory Alerts</h5>
+                            <h2 class="display-6" id="dashboard-reorder-needed">0</h2>
+                            <p class="card-text"><i class="fas fa-exclamation-triangle"></i> Low Stock / Expiring</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row mt-4">
+                <div class="col-md-6">
+                    <h5>Recent Sales (Today)</h5>
+                    <div id="dashboard-recent-sales-table" class="card p-3">
+                        <p>Loading...</p>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <h5>Quick Actions</h5>
+                    <div class="d-grid gap-2">
+                        <button class="btn btn-lg btn-success" onclick="showScreen('pos-screen')"><i class="fas fa-plus"></i> New Sale</button>
+                        <button class="btn btn-lg btn-secondary" data-bs-toggle="modal" data-bs-target="#heldSalesModal"><i class="fas fa-hand-paper"></i> Resume Held Sale</button>
+                        <button class="btn btn-lg btn-info" onclick="showScreen('inventory-screen')"><i class="fas fa-pills"></i> Manage Stock</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="pos-screen" class="screen">
+            <div class="row">
+                <div class="col-md-4 pos-sidebar p-3">
+                    <h5 class="mb-3">Search Products</h5>
+                    <input type="text" id="product-search" class="form-control mb-3" placeholder="Search by name, type, or batch..." onkeyup="searchProduct()">
+                    <div id="product-list" class="list-group">
+                        <p class="text-muted">Start typing to see products...</p>
+                    </div>
+                </div>
+                
+                <div class="col-md-8 p-3">
+                    <div class="d-flex justify-content-between mb-3">
+                        <h4 class="mb-0">Current Cart</h4>
+                        <div>
+                             <button class="btn btn-sm btn-warning me-2" onclick="holdSale()"><i class="fas fa-hand-paper"></i> Hold Sale</button>
+                             <button class="btn btn-sm btn-secondary me-2" data-bs-toggle="modal" data-bs-target="#heldSalesModal" onclick="renderHeldSalesList()"><i class="fas fa-list"></i> Held Bills</button>
+                             <button class="btn btn-sm btn-info" id="print-last-btn" onclick="printLastInvoice()" style="display: none;"><i class="fas fa-print"></i> Last Invoice</button>
+                        </div>
+                    </div>
+
+                    <div class="cart-section card p-2 mb-3 shadow-sm">
+                        <table class="table table-sm table-striped">
+                            <thead class="table-dark">
+                                <tr>
+                                    <th>Item</th>
+                                    <th style="width: 80px;">Qty</th>
+                                    <th style="width: 100px;">Total (PKR)</th>
+                                    <th style="width: 40px;"></th>
+                                </tr>
+                            </thead>
+                            <tbody id="cart-table-body">
+                                <tr><td colspan="4" class="text-center text-muted">Cart is empty.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <h6>Customer Details</h6>
+                            <input type="text" id="customer-name" class="form-control form-control-sm mb-2" placeholder="Customer Name">
+                            <input type="text" id="customer-phone" class="form-control form-control-sm" placeholder="Customer Phone">
+                        </div>
+                        <div class="col-md-6">
+                            <h6>Bill Adjustments</h6>
+                            <div class="input-group input-group-sm mb-2">
+                                <span class="input-group-text">Tax %</span>
+                                <input type="number" id="tax-percent" value="0" min="0" max="100" class="form-control" onchange="calculateTotal()" style="width: 60px;">
+                                <span class="input-group-text">Amount: <span id="tax-amount">0.00</span></span>
+                            </div>
+                            <div class="input-group input-group-sm">
+                                <span class="input-group-text">Discount %</span>
+                                <input type="number" id="discount" value="0" min="0" max="100" class="form-control" onchange="calculateTotal()" style="width: 60px;">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card p-3 bg-light shadow-lg">
+                        <div class="d-flex justify-content-between">
+                            <strong>Subtotal:</strong> <span id="subtotal">0.00</span> PKR
+                        </div>
+                        <div class="d-flex justify-content-between mb-2">
+                            <strong>Total Tax:</strong> <span id="tax-display">0.00</span> PKR
+                        </div>
+                        <hr class="my-1">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h4 class="text-danger mb-0">GRAND TOTAL:</h4>
+                            <h3 class="text-danger mb-0" id="grand-total">0.00 PKR</h3>
+                        </div>
+                        
+                        <div class="d-flex justify-content-between">
+                            <select id="payment-method" class="form-select me-2" style="width: 150px;">
+                                <option value="Cash">Cash</option>
+                                <option value="Card">Card</option>
+                                <option value="Online">Online</option>
+                            </select>
+                            <button class="btn btn-success btn-lg w-100" onclick="finalizeSale()">
+                                <i class="fas fa-check"></i> Complete Sale
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="inventory-screen" class="screen">
+            <h4 class="mb-3">Inventory Management</h4>
+            <div class="row">
+                <div class="col-md-4">
+                    <div class="card p-3 shadow-sm mb-4">
+                        <h5 class="card-title">Add/Update Product</h5>
+                        <form id="add-product-form">
+                            <input type="text" id="p-name" class="form-control form-control-sm mb-2" placeholder="Product Name" required>
+                            <div class="row">
+                                <div class="col"><input type="text" id="p-batch" class="form-control form-control-sm mb-2" placeholder="Batch No." required></div>
+                                <div class="col"><input type="date" id="p-expiry" class="form-control form-control-sm mb-2" required></div>
+                            </div>
+                            <input type="text" id="p-type" class="form-control form-control-sm mb-2" placeholder="Type (e.g., Tablet, Syrup)">
+                            <select id="p-supplier" class="form-select form-select-sm mb-2">
+                                <option value="">Supplier (Optional)</option>
+                            </select>
+                            <div class="row">
+                                <div class="col"><input type="number" id="p-cost" class="form-control form-control-sm mb-2" placeholder="Cost Price" step="0.01" required></div>
+                                <div class="col"><input type="number" id="p-price" class="form-control form-control-sm mb-2" placeholder="Sell Price" step="0.01" required></div>
+                            </div>
+                            <div class="row">
+                                <div class="col"><input type="number" id="p-qty" class="form-control form-control-sm mb-2" placeholder="Stock Qty (in)" min="1" required></div>
+                                <div class="col"><input type="number" id="p-reorder" class="form-control form-control-sm mb-2" placeholder="Reorder Level" min="0"></div>
+                            </div>
+                            <button type="submit" class="btn btn-primary btn-sm w-100">Add/Update Stock</button>
+                        </form>
+                    </div>
+                    
+                    <div class="card p-3 shadow-sm mb-4">
+                        <h5 class="card-title">Manage Suppliers</h5>
+                        <form id="add-supplier-form">
+                            <input type="text" id="s-name" class="form-control form-control-sm mb-2" placeholder="Supplier Name" required>
+                            <input type="text" id="s-phone" class="form-control form-control-sm mb-2" placeholder="Phone">
+                            <button type="submit" class="btn btn-info btn-sm w-100">Add New Supplier</button>
+                        </form>
+                        <div id="supplier-list-container" class="mt-3"></div>
+                    </div>
+                    
+                    <div class="card p-3 shadow-sm">
+                        <h5 class="card-title">CSV Import (Batch Stock)</h5>
+                        <input type="file" id="csv-import" accept=".csv" class="form-control form-control-sm" onchange="handleCSVImport(event)">
+                        <small class="text-muted mt-2">Required headers: name, batch, expiry, type, price, cost, stock, reorderlevel, supplier</small>
+                    </div>
+                </div>
+                
+                <div class="col-md-8">
+                    <div class="card p-3 shadow-sm">
+                        <h5 class="card-title">Current Inventory List</h5>
+                        <div class="table-responsive" style="max-height: 70vh; overflow-y: auto;">
+                            <table class="table table-sm table-hover table-striped" id="inventory-table">
+                                <thead class="table-dark sticky-top">
+                                    <tr>
+                                        <th>ID</th><th>Name</th><th>Batch</th><th>Expiry</th><th>Type</th><th>Sell Price</th><th>Cost Price</th><th>Reorder</th><th>Stock</th><th>Supplier</th><th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td colspan="11" class="text-center">Loading Inventory...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="purchase-screen" class="screen">
+            <h4 class="mb-3">Purchase Record (Stock-In Transactions)</h4>
+            <div class="row">
+                <div class="col-md-4">
+                    <div class="card p-3 shadow-sm">
+                        <h5 class="card-title">Record New Purchase</h5>
+                        <form id="add-purchase-form">
+                            <input type="date" id="purchase-date" class="form-control form-control-sm mb-2" required>
+                            <input type="text" id="purchase-invoice-no" class="form-control form-control-sm mb-2" placeholder="Invoice/Bill No." required>
+                            <select id="purchase-supplier" class="form-select form-select-sm mb-2" required>
+                                <option value="">-- Select Supplier --</option>
+                            </select>
+                            <input type="number" id="purchase-total" class="form-control form-control-sm mb-2" placeholder="Total Cost Amount (PKR)" step="0.01" min="0" required>
+                            <small class="text-muted d-block mb-3">Note: Individual stock update is done in Inventory tab.</small>
+                            <button type="submit" class="btn btn-success btn-sm w-100">Record Purchase</button>
+                        </form>
+                    </div>
+                </div>
+                <div class="col-md-8">
+                    <div class="card p-3 shadow-sm">
+                        <h5 class="card-title">Purchase History</h5>
+                        <div class="table-responsive" style="max-height: 70vh; overflow-y: auto;">
+                            <table class="table table-sm table-striped" id="purchase-table">
+                                <thead class="table-dark sticky-top">
+                                    <tr><th>Date</th><th>Invoice No.</th><th>Supplier</th><th>Total Cost</th><th>Action</th></tr>
+                                </thead>
+                                <tbody>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="expense-screen" class="screen">
+            <h4 class="mb-3">Expense Tracking</h4>
+            <div class="row">
+                <div class="col-md-4">
+                    <div class="card p-3 shadow-sm">
+                        <h5 class="card-title">Record New Expense</h5>
+                        <form id="add-expense-form">
+                            <input type="date" id="expense-date" class="form-control form-control-sm mb-2" required>
+                            <select id="expense-category" class="form-select form-select-sm mb-2" required>
+                                <option value="">-- Select Category --</option>
+                                <option value="Salary">Salary</option>
+                                <option value="Rent">Rent</option>
+                                <option value="Utility">Utility Bills</option>
+                                <option value="Marketing">Marketing</option>
+                                <option value="Other">Other</option>
+                            </select>
+                            <input type="number" id="expense-amount" class="form-control form-control-sm mb-2" placeholder="Amount (PKR)" step="0.01" min="0.01" required>
+                            <textarea id="expense-description" class="form-control form-control-sm mb-3" placeholder="Description (e.g., Electricity bill for June)"></textarea>
+                            <button type="submit" class="btn btn-danger btn-sm w-100">Record Expense</button>
+                        </form>
+                    </div>
+                </div>
+                <div class="col-md-8">
+                    <div class="card p-3 shadow-sm">
+                        <h5 class="card-title">Expense History</h5>
+                        <div class="table-responsive" style="max-height: 70vh; overflow-y: auto;">
+                            <table class="table table-sm table-striped" id="expense-table">
+                                <thead class="table-dark sticky-top">
+                                    <tr><th>Date</th><th>Category</th><th>Amount</th><th>Description</th><th>Action</th></tr>
+                                </thead>
+                                <tbody>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="reports-screen" class="screen">
+            <h4 class="mb-3">Business Reports</h4>
+            
+            <div class="card p-3 shadow-sm mb-3">
+                <div class="row align-items-end">
+                    <div class="col-md-3">
+                        <label for="report-start-date" class="form-label">Start Date</label>
+                        <input type="date" id="report-start-date" class="form-control">
+                    </div>
+                    <div class="col-md-3">
+                        <label for="report-end-date" class="form-label">End Date</label>
+                        <input type="date" id="report-end-date" class="form-control">
+                    </div>
+                    <div class="col-md-2">
+                        <button class="btn btn-primary w-100" onclick="applyReportFilter()">Apply Filter</button>
+                    </div>
+                    <div class="col-md-4 report-tabs text-end">
+                        <button class="btn btn-secondary report-btn" onclick="renderReports('sales-report')">Sales/Refund</button>
+                        <button class="btn btn-secondary report-btn" onclick="renderReports('profit-report')">Profit/Loss</button>
+                        <button class="btn btn-secondary report-btn" onclick="renderReports('expiry-report')">Expiry/Stock</button>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="report-content" class="card p-3 shadow-sm">
+                <p class="alert alert-warning">Please apply a date filter first to view reports.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="heldSalesModal" tabindex="-1" aria-labelledby="heldSalesModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="heldSalesModalLabel">Held Bills/Sales</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body" id="held-sales-list">
+                <p>Loading held sales...</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="returnModal" tabindex="-1" aria-labelledby="returnModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header bg-danger text-white">
+                <h5 class="modal-title" id="returnModalLabel"><i class="fas fa-undo"></i> Process Return/Refund</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label for="return-invoice-id" class="form-label">Enter Original Invoice ID:</label>
+                    <div class="input-group">
+                        <input type="number" id="return-invoice-id" class="form-control" placeholder="e.g., 1001">
+                        <button class="btn btn-primary" onclick="loadSaleForReturn()">Load Sale</button>
+                    </div>
+                </div>
+                <div id="return-details-area">
+                    <div class="alert alert-info">Enter an Invoice ID above to view details and process a return.</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="print-area"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+<script>
+    
+    // =================================================================
+    // --- 🔑 1. SUPABASE CONFIGURATION (MUST CHANGE THESE) 🔑 ---
+    // =================================================================
+    
+    // ⚠️ یہاں اپنا Project URL لگائیں (مثال: https://abcdxyz1234.supabase.co)
+    // ⚠️ آپ کو یہ ویلیو خود ہی کاپی اور پیسٹ کرنی ہوگی۔
+    const SUPABASE_URL = 'YOUR_SUPABASE_PROJECT_URL_HERE'; 
+    
+    // ⚠️ یہاں اپنی Anon Public Key لگائیں
+    // ⚠️ آپ کو یہ ویلیو خود ہی کاپی اور پیسٹ کرنی ہوگی۔
+    const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY_HERE'; 
+
+    // Supabase Client کو انیشیئلائز کریں
+    const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    // =================================================================
+
+
+    // =================================================================
+    // --- 2. GLOBAL DATA ARRAYS ---
+    // =================================================================
+    let inventory = []; 
+    let sales = [];     
+    let heldSales = []; 
+    let suppliers = []; 
+    let purchases = []; 
+    let expenses = [];  
+    let cart = [];      
+
+    let currentFilterStartDate = null;
+    let currentFilterEndDate = null;
+    let lastSaleInvoiceId = null; 
+
+    // --- Core Utility Functions ---
+
+    function dateInRange(dateStr, startStr, endStr) {
+        return dateStr >= startStr && dateStr <= endStr;
+    }
+
+    function calculateHeldTotal(sale) {
+        // This helper function is used by holdSale and resumeHeldSale to calculate total without local state
+        let subtotal = sale.cart.reduce((sum, item) => sum + (item.price * item.qty), 0);
+        // Uses the provided tax/discount percentages in the held sale object
+        const taxFactor = 1 + (sale.taxPercent / 100);
+        const discountFactor = 1 - (sale.discount / 100);
+        let total = subtotal * taxFactor * discountFactor;
+        return total < 0 ? 0 : total;
+    }
+
+    function getDateRange(filter) {
+        const now = new Date();
+        let startDate = new Date();
+        let endDate = new Date();
+        endDate.setHours(23, 59, 59, 999);
+
+        switch (filter) {
+            case 'day': startDate.setHours(0, 0, 0, 0); break;
+            case 'week': startDate.setDate(now.getDate() - 7); startDate.setHours(0, 0, 0, 0); break;
+            case 'month': startDate = new Date(now.getFullYear(), now.getMonth(), 1); startDate.setHours(0, 0, 0, 0); break;
+            case 'all': default: startDate = new Date(0); break;
+        }
+        
+        return { 
+            startDate: startDate.toISOString().split('T')[0], 
+            endDate: endDate.toISOString().split('T')[0] 
+        };
+    }
+    
+    function updatePrintButtonVisibility() {
+        const btn = document.getElementById('print-last-btn');
+        if (btn) {
+            btn.style.display = lastSaleInvoiceId !== null ? 'inline-block' : 'none';
+        }
+    }
+    
+    function printLastInvoice() {
+        if (lastSaleInvoiceId) {
+            const sale = sales.find(s => s.invoice === lastSaleInvoiceId && s.type === 'Sale');
+            if (sale) {
+                printInvoice(sale);
+            } else {
+                alert("Last sale invoice not found.");
+            }
+        }
+    }
+
+    // =================================================================
+    // --- 3. SUPABASE DATA SYNC FUNCTIONS ---
+    // =================================================================
+
+    /** Fetches data from Supabase when the app starts. */
+    async function loadData() {
+        try {
+            // 1. Inventory
+            const { data: invData, error: invError } = await supabase.from('inventory').select('*');
+            if (invError) throw invError;
+            inventory = invData.map(item => ({ 
+                id: item.id, name: item.product_name, batch: item.batch_no, expiry: item.expiry_date, 
+                type: item.product_type, price: item.sell_price, cost: item.cost_price, 
+                stock: item.stock_qty, reorderLevel: item.reorder_level, supplier: item.supplier_name 
+            }));
+
+            // 2. Sales (includes Held)
+            const { data: salesData, error: salesError } = await supabase
+                .from('sales')
+                .select('*')
+                .order('full_date', { ascending: false });
+            if (salesError) throw salesError;
+            
+            const normalizedSales = salesData.map(s => ({
+                id: s.id, invoice: s.invoice_id, date: s.sale_date, fullDate: s.full_date,
+                total: s.total_amount, subtotal: s.subtotal, taxPercent: s.tax_percent,
+                taxAmount: s.tax_amount, discountPercent: s.discount_percent,
+                totalCost: s.total_cost, profit: s.profit, paymentMethod: s.payment_method,
+                customerName: s.customer_name, customerPhone: s.customer_phone,
+                items: s.cart_items, type: s.status, // type = Sale/Refund/Held
+                status: s.status, originalInvoice: s.original_invoice,
+                // For heldSales local array:
+                cart: s.cart_items, heldTime: new Date(s.full_date).toLocaleString(), discount: s.discount_percent
+            }));
+            
+            sales = normalizedSales.filter(s => s.status !== 'Held');
+            heldSales = normalizedSales.filter(s => s.status === 'Held');
+            
+            // 3. Suppliers
+            const { data: supData, error: supError } = await supabase.from('suppliers').select('*');
+            if (supError) throw supError;
+            suppliers = supData.map(s => ({ id: s.id, name: s.supplier_name, phone: s.phone }));
+            
+            // 4. Purchases
+            const { data: purData, error: purError } = await supabase.from('purchases').select('*');
+            if (purError) throw purError;
+            purchases = purData.map(p => ({ 
+                id: p.id, date: p.purchase_date, fullDate: p.full_date, 
+                invoiceNo: p.invoice_no, supplier: p.supplier_name, total: p.total_cost 
+            }));
+            
+            // 5. Expenses
+            const { data: expData, error: expError } = await supabase.from('expenses').select('*');
+            if (expError) throw expError;
+            expenses = expData.map(e => ({ 
+                id: e.id, date: e.expense_date, fullDate: e.full_date, 
+                category: e.category, amount: e.amount, description: e.description 
+            }));
+
+            console.log("All data loaded successfully from Supabase.");
+            
+        } catch (e) {
+            console.error("Critical Error loading data from Supabase:", e);
+            document.getElementById('sale-message').innerHTML = '<div class="alert alert-danger mt-2">Data Loading Failed! Check API Keys, URL, or RLS status in Supabase console.</div>';
+            return; // Stop initialization if critical error
+        }
+        
+        initPOS(); 
+    }
+
+    /** Updates the count of held sales in the POS tab. */
+    function updateHeldCount() {
+        const heldCountElement = document.getElementById('held-count');
+        if(heldCountElement) {
+            heldCountElement.textContent = heldSales.length;
+        }
+    }
+
+
+    // =================================================================
+    // --- 4. SCREEN & DASHBOARD LOGIC ---
+    // =================================================================
+
+    function initPOS() {
+        const today = new Date().toISOString().split('T')[0];
+        const purchaseDateInput = document.getElementById('purchase-date');
+        const expenseDateInput = document.getElementById('expense-date');
+        
+        if (purchaseDateInput) purchaseDateInput.value = today;
+        if (expenseDateInput) expenseDateInput.value = today;
+
+        updateHeldCount();
+        showScreen('dashboard-screen'); 
+    }
+
+    function showScreen(screenId) {
+        document.querySelectorAll('.screen').forEach(screen => screen.classList.remove('active'));
+        const screenElement = document.getElementById(screenId);
+        if (screenElement) screenElement.classList.add('active');
+
+        document.querySelectorAll('.tabs button').forEach(btn => btn.classList.remove('active'));
+        const activeBtn = document.querySelector(`.tabs button[data-target="${screenId}"]`);
+        if (activeBtn) activeBtn.classList.add('active');
+
+        if (screenId === 'inventory-screen') {
+            renderInventory();
+            renderSupplierList();
+            populateSupplierDropdowns();
+        } else if (screenId === 'pos-screen') {
+            searchProduct(); 
+            renderCart();
+            updatePrintButtonVisibility(); 
+        } else if (screenId === 'reports-screen') {
+            const today = new Date().toISOString().split('T')[0];
+            document.getElementById('report-start-date').value = today;
+            document.getElementById('report-end-date').value = today;
+            currentFilterStartDate = today;
+            currentFilterEndDate = today;
+            renderReports('sales-report');
+        } else if (screenId === 'dashboard-screen') {
+            renderDashboard();
+        } else if (screenId === 'purchase-screen') {
+            renderPurchaseHistory();
+            populateSupplierDropdowns();
+        } else if (screenId === 'expense-screen') {
+            renderExpenseHistory();
+        }
+    }
+
+    function renderDashboard() {
+        const filter = document.getElementById('dashboard-filter')?.value || 'day';
+        const { startDate, endDate } = getDateRange(filter);
+
+        let totalSales = 0;
+        let totalProfit = 0;
+        let totalExpenses = 0;
+        let periodName = document.getElementById('dashboard-filter').options[document.getElementById('dashboard-filter').selectedIndex].text;
+        
+        const filteredSales = sales.filter(sale => dateInRange(sale.date, startDate, endDate));
+        filteredSales.forEach(sale => {
+            totalSales += sale.total > 0 ? sale.total : 0; 
+            totalProfit += sale.profit;
+        });
+
+        const filteredExpenses = expenses.filter(exp => dateInRange(exp.date, startDate, endDate));
+        filteredExpenses.forEach(exp => {
+            totalExpenses += exp.amount;
+        });
+        
+        const netProfitAfterExpense = totalProfit - totalExpenses;
+
+        const reorderNeededCount = inventory.filter(item => {
+            const isLowStock = item.stock <= item.reorderLevel;
+            const isExpired = new Date(item.expiry) < new Date(new Date().toISOString().split('T')[0]);
+            return isLowStock || isExpired;
+        }).length;
+
+        document.getElementById('dashboard-period').textContent = periodName;
+        document.getElementById('dashboard-period-2').textContent = periodName;
+        document.getElementById('dashboard-period-3').textContent = periodName;
+
+        document.getElementById('dashboard-sales').textContent = totalSales.toFixed(2) + ' PKR';
+        document.getElementById('dashboard-profit').textContent = netProfitAfterExpense.toFixed(2) + ' PKR';
+        document.getElementById('dashboard-expenses').textContent = totalExpenses.toFixed(2) + ' PKR';
+        document.getElementById('dashboard-reorder-needed').textContent = reorderNeededCount;
+        
+        // Render Recent Sales Table
+        const today = new Date().toISOString().split('T')[0];
+        const salesToday = sales.filter(s => s.date === today && s.total > 0 && s.type === 'Sale'); 
+        const container = document.getElementById('dashboard-recent-sales-table');
+
+        if (salesToday.length === 0) {
+            container.innerHTML = '<p class="alert alert-info">No sales recorded today.</p>';
+            return;
+        }
+
+        let tableHTML = `<table class="table table-striped table-sm">
+            <thead class="table-secondary"><tr><th>Invoice ID</th><th>Time</th><th>Customer</th><th>Total</th></tr></thead><tbody>`;
+
+        salesToday.slice().sort((a, b) => new Date(b.fullDate) - new Date(a.fullDate)).slice(0, 5).forEach(sale => {
+            const time = new Date(sale.fullDate).toLocaleTimeString();
+            const customerDisplay = sale.customerName || 'N/A';
+            tableHTML += `<tr><td>${sale.invoice}</td><td>${time}</td><td>${customerDisplay}</td><td>${sale.total.toFixed(2)}</td></tr>`;
+        });
+        
+        tableHTML += '</tbody></table>';
+        container.innerHTML = tableHTML;
+    }
+
+    // =================================================================
+    // --- 5. INVENTORY / SUPPLIER LOGIC (SUPABASE CRUD) ---
+    // =================================================================
+
+    function populateSupplierDropdowns() {
+        const inventoryDropdown = document.getElementById('p-supplier');
+        const purchaseDropdown = document.getElementById('purchase-supplier');
+
+        if (inventoryDropdown) inventoryDropdown.innerHTML = '<option value="">Supplier (Optional)</option>';
+        if (purchaseDropdown) purchaseDropdown.innerHTML = '<option value="">-- Select Supplier --</option>';
+
+        suppliers.forEach(supplier => {
+            const option = `<option value="${supplier.name}" data-id="${supplier.id}">${supplier.name}</option>`;
+            if (inventoryDropdown) inventoryDropdown.innerHTML += option;
+            if (purchaseDropdown) purchaseDropdown.innerHTML += option;
+        });
+    }
+
+    async function handleAddSupplier(event) {
+        event.preventDefault();
+        const name = document.getElementById('s-name')?.value.trim();
+        const phone = document.getElementById('s-phone')?.value.trim();
+
+        if (!name) return alert("Supplier name is required.");
+
+        const newSupplier = {
+            supplier_name: name, 
+            phone: phone         
+        };
+
+        const { data, error } = await supabase
+            .from('suppliers')
+            .insert([newSupplier])
+            .select();
+
+        if (error) {
+            if (error.code === '23505') { 
+                 alert(`Supplier "${name}" already exists!`);
+            } else {
+                 console.error("Error adding supplier:", error);
+                 alert("Error adding supplier. Check console.");
+            }
+        } else {
+            suppliers.push({ id: data[0].id, name: data[0].supplier_name, phone: data[0].phone }); 
+            renderSupplierList();
+            populateSupplierDropdowns();
+            document.getElementById('add-supplier-form').reset();
+            alert(`Supplier "${name}" added.`);
+        }
+    }
+
+    async function deleteSupplier(id) {
+        if (!confirm("Are you sure you want to delete this supplier?")) return;
+        
+        const { error } = await supabase
+            .from('suppliers')
+            .delete()
+            .eq('id', id); 
+
+        if (error) {
+            console.error("Error deleting supplier:", error);
+            return alert("Failed to delete supplier. Check console.");
+        }
+
+        suppliers = suppliers.filter(s => s.id !== id);
+        renderSupplierList();
+        populateSupplierDropdowns();
+        alert("Supplier deleted successfully.");
+    }
+
+    function renderSupplierList() {
+        const container = document.getElementById('supplier-list-container');
+        if (!container) return;
+        const displaySuppliers = suppliers.filter(s => s.name !== 'N/A (CSV Import)');
+
+        if (displaySuppliers.length === 0) {
+            container.innerHTML = '<p class="alert alert-warning">No suppliers added yet.</p>';
+            return;
+        }
+
+        let html = `<table class="table table-sm table-striped"><thead><tr><th>ID</th><th>Name</th><th>Phone</th><th>Action</th></tr></thead><tbody>`;
+        displaySuppliers.forEach(s => {
+            html += `<tr><td>${s.id}</td><td>${s.name}</td><td>${s.phone}</td>
+                <td><button class="btn btn-sm btn-danger" onclick="deleteSupplier(${s.id})"><i class="fas fa-trash"></i></button></td></tr>`;
+        });
+        html += `</tbody></table>`;
+        container.innerHTML = html;
+    }
+
+
+    async function processInventoryItem({ name, batch, expiry, type, price, cost, stock, reorderLevel, supplier }) {
+        if (price < cost) {
+             alert(`Error for ${name}: Selling Price must be higher than Cost Price.`);
+             return;
+        }
+        if (isNaN(stock) || stock < 0 || isNaN(price) || isNaN(cost)) {
+             alert(`Error for ${name}: Invalid number for stock, price, or cost.`);
+             return;
+        }
+        
+        const finalSupplier = supplier || 'N/A'; 
+
+        const existingItem = inventory.find(item => 
+            item.name.toLowerCase() === name.toLowerCase() && 
+            item.batch.toLowerCase() === batch.toLowerCase()
+        );
+
+        let itemToUpsert = {};
+        let successMessage = '';
+        let isUpdate = false;
+
+        if (existingItem) {
+            isUpdate = true;
+            // --- UPDATE LOGIC (WAC) ---
+            const oldTotalValue = existingItem.stock * existingItem.cost;
+            const newTotalValue = stock * cost;
+            const finalStock = existingItem.stock + stock;
+            const finalCost = (oldTotalValue + newTotalValue) / finalStock;
+            const finalExpiry = new Date(expiry) > new Date(existingItem.expiry) ? expiry : existingItem.expiry;
+            
+            itemToUpsert = {
+                product_name: name, batch_no: batch, expiry_date: finalExpiry, product_type: type, 
+                sell_price: price, cost_price: finalCost, stock_qty: finalStock, 
+                reorder_level: reorderLevel, supplier_name: finalSupplier 
+            };
+            successMessage = `Stock for '${name}' (Batch: ${batch}) updated! New Stock: ${finalStock}. New Avg Cost: ${finalCost.toFixed(2)}.`;
+            
+            const { data, error } = await supabase
+                .from('inventory')
+                .update(itemToUpsert)
+                .eq('id', existingItem.id)
+                .select();
+            
+            if (error) { console.error("Error updating product:", error); return alert("Error updating product. Check console."); }
+            
+            // Update local array with Supabase data
+            const index = inventory.findIndex(i => i.id === existingItem.id);
+            if (index !== -1) {
+                inventory[index] = { 
+                    id: data[0].id, name: data[0].product_name, batch: data[0].batch_no, expiry: data[0].expiry_date, 
+                    type: data[0].product_type, price: data[0].sell_price, cost: data[0].cost_price, 
+                    stock: data[0].stock_qty, reorderLevel: data[0].reorder_level, supplier: data[0].supplier_name 
+                };
+            }
+
+        } else {
+            // --- INSERT LOGIC (NEW ITEM) ---
+            itemToUpsert = {
+                product_name: name, batch_no: batch, expiry_date: expiry, product_type: type, 
+                sell_price: price, cost_price: cost, stock_qty: stock, 
+                reorder_level: reorderLevel, supplier_name: finalSupplier 
+            };
+            successMessage = `New Item '${name}' added successfully!`;
+            
+            const { data, error } = await supabase
+                .from('inventory')
+                .insert([itemToUpsert])
+                .select();
+                
+            if (error) { console.error("Error adding new product:", error); return alert("Error adding new product. Check console."); }
+            
+            // Update local array with Supabase data
+            inventory.push({ 
+                id: data[0].id, name: data[0].product_name, batch: data[0].batch_no, expiry: data[0].expiry_date, 
+                type: data[0].product_type, price: data[0].sell_price, cost: data[0].cost_price, 
+                stock: data[0].stock_qty, reorderLevel: data[0].reorder_level, supplier: data[0].supplier_name 
+            });
+        }
+        
+        // Show alert only for manual form entry (check if the function was called with the full object and not from CSV)
+        if (arguments[0] && arguments[0].name === name && arguments.length === 1 && !isUpdate) { 
+            alert(successMessage);
+        }
+        renderInventory();
+        renderDashboard();
+    }
+
+    function handleAddProduct(event) {
+        event.preventDefault();
+        
+        const name = document.getElementById('p-name')?.value.trim();
+        const batch = document.getElementById('p-batch')?.value.trim();
+        const expiry = document.getElementById('p-expiry')?.value;
+        const type = document.getElementById('p-type')?.value.trim(); 
+        const price = parseFloat(document.getElementById('p-price')?.value);
+        const cost = parseFloat(document.getElementById('p-cost')?.value); 
+        const stock = parseInt(document.getElementById('p-qty')?.value);
+        const reorderLevel = parseInt(document.getElementById('p-reorder')?.value);
+        const supplier = document.getElementById('p-supplier')?.value || 'N/A'; 
+
+        processInventoryItem({ name, batch, expiry, type, price, cost, stock, reorderLevel, supplier });
+        document.getElementById('add-product-form')?.reset();
+    }
+
+    function renderInventory() {
+        const tableBody = document.getElementById('inventory-table')?.querySelector('tbody');
+        if (!tableBody) return; 
+        
+        tableBody.innerHTML = ''; 
+        const sortedInventory = [...inventory].sort((a, b) => a.name.localeCompare(b.name));
+        const today = new Date(new Date().toISOString().split('T')[0]);
+
+        sortedInventory.forEach(item => {
+            const row = tableBody.insertRow();
+            let rowClass = '';
+            const expiryDate = new Date(item.expiry);
+            const diffDays = Math.ceil((expiryDate - today) / (1000 * 60 * 60 * 24));
+
+            if (expiryDate < today) {
+                rowClass = 'expired-row';
+            } else if (item.stock <= item.reorderLevel) {
+                rowClass = 'reorder-needed';
+            } else if (diffDays <= 90 && diffDays > 0) { 
+                rowClass = 'soon-to-expire-row';
+            } else if (item.stock < 10) {
+                 rowClass = 'low-stock-row';
+            }
+
+            row.className = rowClass;
+            const supplierDisplay = item.supplier || 'N/A'; 
+
+            row.innerHTML = `
+                <td>${item.id}</td>
+                <td>${item.name}</td>
+                <td>${item.batch}</td>
+                <td>${item.expiry}</td>
+                <td>${item.type || 'N/A'}</td> <td>${parseFloat(item.price).toFixed(2)}</td>
+                <td>${parseFloat(item.cost).toFixed(2)}</td>
+                <td>${item.reorderLevel}</td>
+                <td>${item.stock}</td>
+                <td>${supplierDisplay}</td>
+                <td><button onclick="deleteProduct(${item.id})" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button></td>
+            `;
+        });
+    }
+
+    async function deleteProduct(id) {
+        if (!confirm("Are you sure you want to delete this item?")) return;
+        
+        const { error } = await supabase
+            .from('inventory')
+            .delete()
+            .eq('id', id);
+
+        if (error) {
+            console.error("Error deleting product:", error);
+            return alert("Failed to delete product. Check console.");
+        }
+        
+        inventory = inventory.filter(item => item.id !== id);
+        renderInventory();
+        alert("Product deleted successfully.");
+    }
+    
+    // NOTE: CSV IMPORT IS A COMPLEX BATCH OPERATION. 
+    // The current logic is designed for sequential processing for demo purposes.
+    function handleCSVImport(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = async function(e) {
+            const csvData = e.target.result;
+            const lines = csvData.split('\n').filter(line => line.trim() !== '');
+
+            if (lines.length <= 1) {
+                alert("The CSV file is empty or contains only headers.");
+                return;
+            }
+            
+            const headers = lines[0].toLowerCase().trim().split(',').map(h => h.trim());
+            const requiredHeaders = ['name', 'batch', 'expiry', 'type', 'price', 'cost', 'stock', 'reorderlevel', 'supplier'];
+
+            const missingHeaders = requiredHeaders.filter(h => !headers.includes(h));
+            if (missingHeaders.length > 0) {
+                alert(`Import Failed: CSV is missing required headers: ${missingHeaders.join(', ')}.`);
+                return;
+            }
+            
+            let successCount = 0;
+            let failCount = 0;
+            let newSupplierCount = 0;
+            
+            // Process sequentially
+            for (let i = 1; i < lines.length; i++) {
+                const values = lines[i].split(',');
+                if (values.length < requiredHeaders.length) {
+                    failCount++;
+                    continue;
+                }
+                
+                const itemData = {};
+                headers.forEach((header, index) => {
+                    itemData[header] = values[index].trim();
+                });
+
+                try {
+                    let supplierName = itemData.supplier || 'N/A'; 
+                    const item = {
+                        name: itemData.name, batch: itemData.batch, expiry: itemData.expiry, type: itemData.type,
+                        price: parseFloat(itemData.price), cost: parseFloat(itemData.cost),
+                        stock: parseInt(itemData.stock), reorderLevel: parseInt(itemData.reorderlevel),
+                        supplier: supplierName
+                    };
+
+                    if (item.supplier !== 'N/A' && !suppliers.some(s => s.name === item.supplier)) {
+                        const newId = suppliers.length > 0 ? Math.max(...suppliers.map(s => s.id)) + 1 : 1;
+                        suppliers.push({ id: newId, name: item.supplier, phone: 'N/A (CSV Import)' });
+                        newSupplierCount++;
+                    }
+                    
+                    // Awaiting each database operation (slow but robust for demo)
+                    await processInventoryItem(item); 
+                    successCount++;
+                } catch (e) {
+                    console.error(`Error processing line ${i + 1}: ${e}`);
+                    failCount++;
+                }
+            }
+            
+            renderInventory();
+            populateSupplierDropdowns();
+
+            alert(`CSV Import Complete!\n- Success: ${successCount} items processed.\n- Failed: ${failCount} items skipped.\n- New Suppliers Added: ${newSupplierCount}.`);
+        };
+
+        reader.readAsText(file);
+        event.target.value = ''; 
+    }
+
+    // =================================================================
+    // --- 6. POS/BILLING LOGIC (SALE, HOLD, REFUND) ---
+    // =================================================================
+
+    function searchProduct() {
+        const query = document.getElementById('product-search')?.value.toLowerCase();
+        const productListDiv = document.getElementById('product-list');
+        if (!productListDiv) return;
+
+        productListDiv.innerHTML = '';
+
+        if (query.length < 2) {
+            productListDiv.innerHTML = '<p class="text-muted">Enter at least 2 characters to search...</p>';
+            return;
+        }
+        
+        const today = new Date().toISOString().split('T')[0];
+
+        const filteredProducts = inventory.filter(item => 
+            (item.name.toLowerCase().includes(query) || 
+             item.batch.toLowerCase().includes(query) || 
+             item.type.toLowerCase().includes(query)) &&
+             item.stock > 0 &&
+             item.expiry >= today 
+        ).sort((a, b) => a.name.localeCompare(b.name));
+
+        if (filteredProducts.length === 0) {
+            productListDiv.innerHTML = '<p class="alert alert-danger">No active stock found for this search.</p>';
+            return;
+        }
+
+        filteredProducts.forEach(item => {
+            const tile = document.createElement('div');
+            tile.className = 'product-tile list-group-item';
+            
+            let badgeClass = 'bg-success';
+            if (item.stock < 10) badgeClass = 'bg-warning text-dark';
+            if (item.stock <= item.reorderLevel) badgeClass = 'bg-danger';
+
+            tile.innerHTML = `
+                <div class="d-flex justify-content-between">
+                    <strong>${item.name}</strong>
+                    <span class="badge ${badgeClass}">Stock: ${item.stock}</span>
+                </div>
+                <small class="text-muted">Batch: ${item.batch} | Exp: ${item.expiry} | PKR ${item.price.toFixed(2)}</small>
+            `;
+            tile.onclick = () => addToCart(item.id, item.batch);
+            productListDiv.appendChild(tile);
+        });
+    }
+
+    function addToCart(id, batch) {
+        const item = inventory.find(i => i.id === id && i.batch === batch);
+        if (!item || item.stock <= 0) {
+            alert("Error: Item out of stock or not found.");
+            return;
+        }
+
+        const existingCartItem = cart.find(i => i.id === id && i.batch === batch);
+
+        if (existingCartItem) {
+            if (existingCartItem.qty < item.stock) {
+                existingCartItem.qty += 1;
+            } else {
+                alert(`Maximum stock reached for ${item.name} (${item.batch}).`);
+                return;
+            }
+        } else {
+            cart.push({
+                id: item.id,
+                name: item.name,
+                batch: item.batch,
+                price: item.price,
+                stock: item.stock,
+                qty: 1
+            });
+        }
+        renderCart();
+    }
+
+    function updateCartQuantity(index, newQty) {
+        let qty = parseInt(newQty);
+        const item = cart[index];
+        
+        if (isNaN(qty) || qty < 1) {
+            qty = 1; 
+            document.querySelector(`#cart-table-body tr:nth-child(${index + 1}) input`).value = 1;
+        }
+
+        if (qty > item.stock) {
+            alert(`Cannot add more than available stock (${item.stock}) for ${item.name}.`);
+            qty = item.stock;
+            document.querySelector(`#cart-table-body tr:nth-child(${index + 1}) input`).value = item.stock;
+        }
+
+        item.qty = qty;
+        renderCart();
+    }
+
+    function removeFromCart(index) {
+        cart.splice(index, 1);
+        renderCart();
+    }
+
+    function renderCart(heldCustomerName = '') {
+        const tableBody = document.getElementById('cart-table-body');
+        if (!tableBody) return;
+
+        tableBody.innerHTML = '';
+
+        if (cart.length === 0) {
+            tableBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">Cart is empty.</td></tr>';
+            calculateTotal();
+            return;
+        }
+        
+        cart.forEach((item, index) => {
+            const total = item.price * item.qty;
+            const row = tableBody.insertRow();
+            row.innerHTML = `
+                <td>${item.name} (${item.batch})</td>
+                <td>
+                    <input type="number" value="${item.qty}" min="1" max="${item.stock}" 
+                        onchange="updateCartQuantity(${index}, this.value)" style="width: 50px;">
+                </td>
+                <td>${total.toFixed(2)}</td>
+                <td><button onclick="removeFromCart(${index})" class="btn btn-danger btn-sm p-1">X</button></td>
+            `;
+        });
+
+        calculateTotal();
+        if (heldCustomerName) {
+             document.getElementById('sale-message').innerHTML = `<div class="alert alert-info mt-2">Held Sale for <strong>${heldCustomerName}</strong> loaded.</div>`;
+        }
+    }
+
+    function calculateTotal() {
+        let subtotal = cart.reduce((sum, item) => sum + (item.price * item.qty), 0);
+        
+        const taxInput = document.getElementById('tax-percent');
+        const taxPercent = taxInput ? parseFloat(taxInput.value) || 0 : 0;
+        
+        const taxAmount = subtotal * (taxPercent / 100);
+        const subtotalPlusTax = subtotal + taxAmount;
+        
+        const discountInput = document.getElementById('discount');
+        const discountPercent = discountInput ? parseFloat(discountInput.value) || 0 : 0;
+        
+        const discountAmount = subtotalPlusTax * (discountPercent / 100);
+        let grandTotal = subtotalPlusTax - discountAmount;
+        
+        if (grandTotal < 0) grandTotal = 0; 
+
+        document.getElementById('subtotal').textContent = subtotal.toFixed(2);
+        document.getElementById('tax-amount').textContent = taxAmount.toFixed(2);
+        document.getElementById('tax-display').textContent = taxAmount.toFixed(2);
+        document.getElementById('grand-total').textContent = grandTotal.toFixed(2);
+    }
+
+    function resetPOSState() {
+        cart = []; 
+        renderCart();
+        document.getElementById('discount').value = 0;
+        document.getElementById('tax-percent').value = 0;
+        document.getElementById('customer-name').value = '';
+        document.getElementById('customer-phone').value = '';
+        document.getElementById('payment-method').value = 'Cash';
+        searchProduct(); 
+    }
+
+    async function holdSale() {
+        if (cart.length === 0) return alert("Cart is empty. Cannot hold an empty sale.");
+
+        const grandTotal = parseFloat(document.getElementById('grand-total').textContent);
+        const subtotal = parseFloat(document.getElementById('subtotal').textContent);
+        const taxPercent = parseFloat(document.getElementById('tax-percent').value) || 0;
+        const taxAmount = parseFloat(document.getElementById('tax-amount').textContent);
+        const discountPercent = parseFloat(document.getElementById('discount').value) || 0;
+        
+        const customerName = document.getElementById('customer-name').value.trim() || `Held Bill #${heldSales.length + 1}`;
+        
+        // 1. Prepare data for Supabase 'sales' table
+        const heldSaleData = {
+            invoice_id: null, 
+            sale_date: new Date().toISOString().split('T')[0],
+            total_amount: grandTotal,
+            subtotal: subtotal,
+            tax_percent: taxPercent,
+            tax_amount: taxAmount,
+            discount_percent: discountPercent,
+            total_cost: 0, profit: 0, // Not calculated for held sales
+            payment_method: document.getElementById('payment-method').value,
+            customer_name: customerName,
+            customer_phone: document.getElementById('customer-phone').value.trim(),
+            cart_items: JSON.parse(JSON.stringify(cart)), 
+            status: 'Held', 
+            full_date: new Date().toISOString()
+        };
+        
+        // 2. Insert into Supabase 'sales' table
+        const { data, error } = await supabase
+            .from('sales')
+            .insert([heldSaleData])
+            .select();
+
+        if (error) {
+            console.error("Error holding sale:", error);
+            return alert("Failed to hold sale. Check console.");
+        }
+        
+        // 3. Update local array and UI (Normalize keys for local held array)
+        heldSales.push({ 
+            id: data[0].id, invoice: data[0].invoice_id, date: data[0].sale_date, fullDate: data[0].full_date,
+            total: data[0].total_amount, customerName: data[0].customer_name, customerPhone: data[0].customer_phone,
+            taxPercent: data[0].tax_percent, discount: data[0].discount_percent,
+            cart: data[0].cart_items, heldTime: new Date(data[0].full_date).toLocaleString()
+        }); 
+        resetPOSState();
+        updateHeldCount();
+        
+        const messageDiv = document.getElementById('sale-message');
+        messageDiv.innerHTML = `<div class="alert alert-warning mt-2">Sale for <strong>${customerName}</strong> held successfully.</div>`;
+        setTimeout(() => messageDiv.innerHTML = '', 3000);
+    }
+
+    function renderHeldSalesList() {
+        const listDiv = document.getElementById('held-sales-list');
+        if (!listDiv) return;
+
+        if (heldSales.length === 0) {
+            listDiv.innerHTML = '<p class="alert alert-info">No pending sales are currently held.</p>';
+            return;
+        }
+
+        let html = `<ul class="list-group">`;
+        heldSales.forEach((sale, index) => {
+            // Note: total is now directly available as sale.total from loadData/holdSale
+            html += `
+                <li class="list-group-item d-flex justify-content-between align-items-center">
+                    <div>
+                        <strong>${sale.customerName}</strong> 
+                        <small class="text-muted">(${sale.heldTime})</small>
+                        <br>Total Items: ${sale.cart.length} | Net Total: ${sale.total.toFixed(2)} PKR
+                    </div>
+                    <div>
+                        <button class="btn btn-sm btn-success me-2" onclick="resumeHeldSale(${index})" data-bs-dismiss="modal">Resume</button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteHeldSale(${index})" data-bs-dismiss="modal">Delete</button>
+                    </div>
+                </li>
+            `;
+        });
+        html += `</ul>`;
+        listDiv.innerHTML = html;
+    }
+
+    async function resumeHeldSale(index) {
+        const heldSale = heldSales[index];
+        
+        // 1. Stock Check (Remains the same)
+        for (const heldItem of heldSale.cart) {
+            const inventoryItem = inventory.find(i => i.id === heldItem.id && i.batch === heldItem.batch);
+            if (!inventoryItem || inventoryItem.stock < heldItem.qty) {
+                alert(`Cannot resume sale: Not enough stock for ${heldItem.name} (Batch: ${heldItem.batch}).`);
+                return; 
+            }
+        }
+
+        const heldSaleId = heldSales[index].id; 
+        
+        // 2. Delete the record from Supabase (since it's no longer held)
+        const { error } = await supabase
+            .from('sales')
+            .delete()
+            .eq('id', heldSaleId);
+
+        if (error) {
+             console.error("Error deleting held sale upon resume:", error);
+             return alert("Failed to resume sale (Database error). Check console.");
+        }
+
+        // 3. Load state locally (Your original logic)
+        resetPOSState();
+        cart = heldSale.cart;
+        document.getElementById('customer-name').value = heldSale.customerName;
+        document.getElementById('customer-phone').value = heldSale.customerPhone;
+        document.getElementById('tax-percent').value = heldSale.taxPercent;
+        document.getElementById('discount').value = heldSale.discount;
+        
+        // 4. Update local array and render
+        heldSales.splice(index, 1);
+        renderCart(heldSale.customerName);
+        updateHeldCount(); 
+
+        const messageDiv = document.getElementById('sale-message');
+        messageDiv.innerHTML = `<div class="alert alert-success mt-2">Sale for <strong>${heldSale.customerName}</strong> resumed.</div>`;
+        setTimeout(() => messageDiv.innerHTML = '', 3000);
+    }
+
+    async function deleteHeldSale(index) {
+        if (!confirm("Are you sure you want to permanently delete this held sale?")) {
+            return;
+        }
+        
+        const heldSaleId = heldSales[index].id; // Supabase record ID
+        
+        // 1. Delete from Supabase
+        const { error } = await supabase
+            .from('sales')
+            .delete()
+            .eq('id', heldSaleId); // Delete by the record ID
+
+        if (error) {
+            console.error("Error deleting held sale:", error);
+            return alert("Failed to delete held sale. Check console.");
+        }
+
+        // 2. Update local array and UI
+        heldSales.splice(index, 1);
+        updateHeldCount();
+        alert("Held sale deleted.");
+        renderHeldSalesList();
+    }
+    
+    async function finalizeSale() {
+        if (cart.length === 0) return alert("Cart is empty.");
+
+        const grandTotal = parseFloat(document.getElementById('grand-total').textContent);
+        const subtotal = parseFloat(document.getElementById('subtotal').textContent);
+        const discountPercent = parseFloat(document.getElementById('discount').value) || 0;
+        const taxPercent = parseFloat(document.getElementById('tax-percent').value) || 0;
+        const taxAmount = parseFloat(document.getElementById('tax-amount').textContent);
+        const paymentMethod = document.getElementById('payment-method').value;
+        const customerName = document.getElementById('customer-name').value.trim();
+        const customerPhone = document.getElementById('customer-phone').value.trim();
+
+        // Get next highest invoice ID (from completed Sales and Refunds)
+        const invoiceId = sales.length > 0 ? Math.max(...sales.map(s => s.invoice || 0)) + 1 : 1001;
+        const fullDate = new Date();
+        const saleDate = fullDate.toISOString().split('T')[0];
+
+        let totalCost = 0;
+        let soldItems = [];
+        const updatePromises = [];
+
+        // 1. Prepare Inventory Updates and Sale Record
+        for (const cartItem of cart) {
+            const inventoryItem = inventory.find(i => i.id === cartItem.id && i.batch === cartItem.batch);
+            
+            if (!inventoryItem || inventoryItem.stock < cartItem.qty) {
+                alert(`Transaction failed: Not enough stock for ${cartItem.name} (Batch: ${cartItem.batch}).`);
+                return;
+            }
+
+            // Prepare Supabase Update
+            const newStock = inventoryItem.stock - cartItem.qty;
+            updatePromises.push(
+                supabase
+                    .from('inventory')
+                    .update({ stock_qty: newStock })
+                    .eq('id', inventoryItem.id)
+            );
+            
+            // Update local inventory array immediately
+            inventoryItem.stock = newStock;
+            
+            totalCost += inventoryItem.cost * cartItem.qty; 
+            
+            soldItems.push({
+                id: cartItem.id, name: cartItem.name, batch: cartItem.batch, qty: cartItem.qty,
+                sellPrice: cartItem.price, costPrice: inventoryItem.cost, lineTotal: cartItem.price * cartItem.qty
+            });
+        }
+
+        const totalProfit = subtotal - totalCost;
+
+        // 2. Execute Inventory Updates
+        const updateResults = await Promise.all(updatePromises);
+        const updateErrors = updateResults.filter(res => res.error).map(res => res.error);
+
+        if (updateErrors.length > 0) {
+            console.error("Inventory Update Errors:", updateErrors);
+            return alert("Transaction failed! Could not update inventory stock.");
+        }
+
+        // 3. Record Sale in 'sales' table
+        const newSaleRecord = {
+            invoice_id: invoiceId, sale_date: saleDate, full_date: fullDate.toISOString(),
+            total_amount: grandTotal, subtotal: subtotal, tax_percent: taxPercent,
+            tax_amount: taxAmount, discount_percent: discountPercent,
+            total_cost: totalCost, profit: totalProfit, payment_method: paymentMethod,
+            customer_name: customerName, customer_phone: customerPhone,
+            cart_items: soldItems, status: 'Sale', original_invoice: null
+        };
+        
+        const { data: saleData, error: saleError } = await supabase
+            .from('sales')
+            .insert([newSaleRecord])
+            .select();
+
+        if (saleError) {
+            console.error("Sale Insert Error:", saleError);
+            return alert("Transaction failed! Could not record the sale.");
+        }
+        
+        // Update local sales array (normalize keys)
+        sales.push({
+            id: saleData[0].id, invoice: saleData[0].invoice_id, date: saleData[0].sale_date, fullDate: saleData[0].full_date,
+            total: saleData[0].total_amount, subtotal: saleData[0].subtotal, taxPercent: saleData[0].tax_percent,
+            taxAmount: saleData[0].tax_amount, discountPercent: saleData[0].discount_percent,
+            totalCost: saleData[0].total_cost, profit: saleData[0].profit, paymentMethod: saleData[0].payment_method,
+            customerName: saleData[0].customer_name, customerPhone: saleData[0].customer_phone,
+            items: saleData[0].cart_items, type: 'Sale', status: 'Sale'
+        });
+        
+        lastSaleInvoiceId = invoiceId;
+        resetPOSState();
+        
+        const messageDiv = document.getElementById('sale-message');
+        messageDiv.innerHTML = `<div class="alert alert-success mt-2">Sale completed! Invoice ID: <strong>${invoiceId}</strong>. Total: ${grandTotal.toFixed(2)} PKR</div>`;
+        setTimeout(() => messageDiv.innerHTML = '', 5000);
+        
+        searchProduct(); 
+        renderDashboard();
+        updatePrintButtonVisibility(); 
+    }
+
+    function printInvoice(sale) {
+        let printContent = `
+            <div class="p-3">
+                <h5 style="text-align:center; margin-bottom: 5px;">PHARMACY POS DEMO</h5>
+                <p style="text-align:center; font-size: 9pt;">Date: ${new Date(sale.fullDate).toLocaleString()}</p>
+                <p style="font-size: 9pt;">Invoice ID: ${sale.invoice}</p>
+                <p style="font-size: 9pt;">Customer: ${sale.customerName || 'Walk-in'}</p>
+                <p style="font-size: 9pt;">Payment: ${sale.paymentMethod}</p>
+                <hr style="border-top: 1px dashed black;">
+                
+                <div style="display: flex; font-size: 9pt; font-weight: bold; margin-bottom: 5px;">
+                    <span style="width: 50%;">Item</span>
+                    <span style="width: 15%; text-align: center;">Qty</span>
+                    <span style="width: 35%; text-align: right;">Total</span>
+                </div>
+                <hr style="border-top: 1px dashed black;">
+        `;
+
+        sale.items.forEach(item => {
+            printContent += `
+                <div style="display: flex; font-size: 9pt; margin-bottom: 3px;">
+                    <span style="width: 50%;">${item.name}</span>
+                    <span style="width: 15%; text-align: center;">${item.qty}</span>
+                    <span style="width: 35%; text-align: right;">${item.lineTotal.toFixed(2)}</span>
+                </div>
+            `;
+        });
+        
+        const subtotalPlusTax = sale.subtotal + sale.taxAmount;
+        const discountAmount = subtotalPlusTax * (sale.discountPercent / 100);
+
+        printContent += `
+                <hr style="border-top: 1px dashed black; margin-top: 10px;">
+                <div style="font-size: 9pt; display: flex; justify-content: space-between;">
+                    <span>Subtotal:</span>
+                    <span style="font-weight: bold;">${sale.subtotal.toFixed(2)} PKR</span>
+                </div>
+                <div style="font-size: 9pt; display: flex; justify-content: space-between;">
+                    <span>Tax (${sale.taxPercent}%):</span>
+                    <span style="font-weight: bold;">${sale.taxAmount.toFixed(2)} PKR</span>
+                </div>
+                <div style="font-size: 9pt; display: flex; justify-content: space-between;">
+                    <span>Discount (${sale.discountPercent}%):</span>
+                    <span style="font-weight: bold;">${discountAmount.toFixed(2)} PKR</span>
+                </div>
+                <hr style="border-top: 1px solid black;">
+                <div style="font-size: 11pt; font-weight: bold; display: flex; justify-content: space-between;">
+                    <span>GRAND TOTAL:</span>
+                    <span>${sale.total.toFixed(2)} PKR</span>
+                </div>
+                
+                <div class="invoice-footer">
+                    Thank You!
+                    <br>
+                    (Demo: Data is stored in Supabase.)
+                </div>
+            </div>
+        `;
+
+        document.getElementById('print-area').innerHTML = printContent;
+        window.print();
+        document.getElementById('print-area').innerHTML = '';
+    }
+
+    // --- REFUND/RETURN LOGIC ---
+
+    function showReturnModal() {
+        document.getElementById('return-invoice-id').value = '';
+        document.getElementById('return-details-area').innerHTML = '';
+        const returnModal = new bootstrap.Modal(document.getElementById('returnModal'));
+        returnModal.show();
+    }
+
+    function loadSaleForReturn() {
+        const invoiceId = parseInt(document.getElementById('return-invoice-id').value);
+        const sale = sales.find(s => s.invoice === invoiceId && s.type === 'Sale');
+        const detailsArea = document.getElementById('return-details-area');
+
+        detailsArea.innerHTML = '';
+        
+        if (!sale) {
+            detailsArea.innerHTML = `<div class="alert alert-danger mt-3">Invoice ID ${invoiceId} not found or is a refund/return transaction.</div>`;
+            return;
+        }
+        
+        // Calculate the total price of all items in the sale (Subtotal * (1 + Tax) * (1 - Discount))
+        const effectiveSaleTotal = sale.total;
+        
+        // Calculate the total subtotal of all items (Price * Qty)
+        const saleSubtotal = sale.items.reduce((acc, item) => acc + item.lineTotal, 0); 
+
+        let html = `
+            <div class="alert alert-success mt-3">
+                <strong>Original Sale Details (Invoice ${sale.invoice})</strong>
+                <p>Date: ${new Date(sale.fullDate).toLocaleDateString()}</p>
+                <p>Total Paid: ${sale.total.toFixed(2)} PKR</p>
+                <p>Customer: ${sale.customerName || 'N/A'}</p>
+            </div>
+            <h6 class="text-danger">Select Items to Return (Max Qty: Original Sale Qty)</h6>
+            <table class="table table-sm table-striped">
+                <thead><tr><th>Item</th><th>Max Qty</th><th>Return Qty</th></tr></thead>
+                <tbody>
+        `;
+
+        sale.items.forEach((item, index) => {
+            // Calculate effective selling price per unit for precise refund amount
+            // This prorates the final total back to the item unit.
+            // Effective Unit Final Price = (Item Line Subtotal / Total Subtotal) * Effective Sale Total / Item Qty
+            const itemGrandTotal = (item.lineTotal / saleSubtotal) * effectiveSaleTotal;
+            const itemEffectivePrice = itemGrandTotal / item.qty;
+
+            html += `
+                <tr>
+                    <td>${item.name} (${item.batch})</td>
+                    <td>${item.qty}</td>
+                    <td>
+                        <input type="number" id="return-qty-${index}" min="0" max="${item.qty}" value="0" 
+                            class="form-control form-control-sm return-qty-input" style="width: 60px;"
+                            data-price="${itemEffectivePrice}" data-cost="${item.costPrice}" data-id="${item.id}" data-batch="${item.batch}" data-max="${item.qty}">
+                    </td>
+                </tr>
+            `;
+        });
+
+        html += `
+                </tbody>
+            </table>
+            <h5 class="text-danger mt-3">Refund Amount: <span id="estimated-refund">0.00</span> PKR</h5>
+            <button class="btn btn-danger w-100" onclick="processReturn(${sale.invoice})">Process Refund</button>
+        `;
+
+        detailsArea.innerHTML = html;
+        
+        document.querySelectorAll('.return-qty-input').forEach(input => {
+            input.addEventListener('input', calculateEstimatedRefund);
+        });
+    }
+
+    function calculateEstimatedRefund() {
+        let estimatedTotal = 0;
+        document.querySelectorAll('.return-qty-input').forEach(input => {
+            let qty = parseInt(input.value) || 0;
+            const price = parseFloat(input.dataset.price);
+            const maxQty = parseInt(input.dataset.max);
+
+            if (qty < 0) qty = 0;
+            if (qty > maxQty) qty = maxQty;
+            input.value = qty;
+
+            estimatedTotal += qty * price;
+        });
+
+        document.getElementById('estimated-refund').textContent = estimatedTotal.toFixed(2);
+    }
+
+    async function processReturn(originalInvoiceId) {
+        const sale = sales.find(s => s.invoice === originalInvoiceId && s.type === 'Sale');
+        if (!sale) return alert("Original sale not found.");
+
+        let refundItems = [];
+        let refundAmount = 0;
+        let totalRefundCost = 0;
+        const inventoryUpdatePromises = [];
+
+        document.querySelectorAll('.return-qty-input').forEach(input => {
+            const qty = parseInt(input.value) || 0;
+            
+            if (qty > 0) {
+                const price = parseFloat(input.dataset.price); // Effective Price
+                const cost = parseFloat(input.dataset.cost);
+                const id = parseInt(input.dataset.id);
+                const batch = input.dataset.batch;
+                
+                const originalItem = sale.items.find(item => item.id === id && item.batch === batch);
+
+                if (!originalItem) return; 
+
+                
+                refundItems.push({
+                    id: id, name: originalItem.name, batch: batch, qty: qty,
+                    sellPrice: originalItem.sellPrice, costPrice: cost, lineTotal: qty * price
+                });
+
+                refundAmount += qty * price;
+                totalRefundCost += qty * cost;
+
+                // Prepare Inventory Update: Return stock to inventory
+                const inventoryItem = inventory.find(i => i.id === id && i.batch === batch);
+                if (inventoryItem) {
+                    const newStock = inventoryItem.stock + qty;
+                    inventoryUpdatePromises.push(
+                        supabase.from('inventory').update({ stock_qty: newStock }).eq('id', inventoryItem.id)
+                    );
+                    // Update local inventory array
+                    inventoryItem.stock = newStock; 
+                }
+            }
+        });
+
+        if (refundItems.length === 0) return alert("No items selected for refund.");
+
+        if (!confirm(`Are you sure you want to process a refund of ${refundAmount.toFixed(2)} PKR?`)) return;
+
+        // 1. Execute Inventory Updates
+        const updateResults = await Promise.all(inventoryUpdatePromises);
+        const updateErrors = updateResults.filter(res => res.error).map(res => res.error);
+        if (updateErrors.length > 0) {
+            console.error("Inventory Update Errors (Refund):", updateErrors);
+            return alert("Refund failed! Could not return stock to inventory.");
+        }
+
+        // 2. Record Refund Transaction
+        const refundInvoiceId = sales.length > 0 ? Math.max(...sales.map(s => s.invoice || 0)) + 1 : 1001;
+        const fullDate = new Date();
+        const refundDate = fullDate.toISOString().split('T')[0];
+
+        const newRefundRecord = {
+            invoice_id: refundInvoiceId, sale_date: refundDate, full_date: fullDate.toISOString(),
+            total_amount: -refundAmount, subtotal: -refundAmount, tax_percent: 0, tax_amount: 0, discount_percent: 0,
+            total_cost: -totalRefundCost, profit: refundAmount - totalRefundCost, payment_method: 'Refund',
+            customer_name: sale.customerName || 'N/A', customer_phone: sale.customerPhone || 'N/A',
+            cart_items: refundItems.map(item => ({ ...item, lineTotal: -item.lineTotal })),
+            status: 'Refund', original_invoice: originalInvoiceId 
+        };
+        
+        const { data: refundData, error: refundError } = await supabase
+            .from('sales')
+            .insert([newRefundRecord])
+            .select();
+
+        if (refundError) {
+            console.error("Refund Insert Error:", refundError);
+            return alert("Refund failed! Could not record the transaction.");
+        }
+
+        // Update local sales array (normalize keys)
+        sales.push({
+            id: refundData[0].id, invoice: refundData[0].invoice_id, date: refundData[0].sale_date, fullDate: refundData[0].full_date,
+            total: refundData[0].total_amount, subtotal: refundData[0].subtotal, taxPercent: refundData[0].tax_percent,
+            taxAmount: refundData[0].tax_amount, discountPercent: refundData[0].discount_percent,
+            totalCost: refundData[0].total_cost, profit: refundData[0].profit, paymentMethod: refundData[0].payment_method,
+            customerName: refundData[0].customer_name, customerPhone: refundData[0].customer_phone,
+            items: refundData[0].cart_items, type: 'Refund', status: 'Refund', originalInvoice: refundData[0].original_invoice
+        });
+        
+        const returnModalElement = document.getElementById('returnModal');
+        const returnModal = bootstrap.Modal.getInstance(returnModalElement);
+        returnModal.hide();
+        
+        alert(`Refund completed! Refund Invoice ID: ${refundInvoiceId}. Amount: ${refundAmount.toFixed(2)} PKR.`);
+        
+        lastSaleInvoiceId = null;
+        updatePrintButtonVisibility();
+
+        renderInventory(); 
+        searchProduct();
+        renderDashboard();
+    }
+
+
+    // =================================================================
+    // --- 7. PURCHASE, EXPENSE, & REPORT LOGIC (SUPABASE CRUD) ---
+    // =================================================================
+
+    async function handleAddPurchase(event) {
+        event.preventDefault();
+        
+        const supplierName = document.getElementById('purchase-supplier')?.value;
+        const date = document.getElementById('purchase-date')?.value;
+        const invoiceNo = document.getElementById('purchase-invoice-no')?.value.trim();
+        const total = parseFloat(document.getElementById('purchase-total')?.value);
+        const fullDate = new Date().toISOString();
+
+        if (!supplierName) return alert("Please select a supplier.");
+
+        const newPurchase = {
+            purchase_date: date, full_date: fullDate, invoice_no: invoiceNo,
+            supplier_name: supplierName, total_cost: total
+        };
+
+        const { data, error } = await supabase
+            .from('purchases')
+            .insert([newPurchase])
+            .select();
+
+        if (error) {
+            console.error("Error adding purchase:", error);
+            return alert("Failed to record purchase. Check console.");
+        }
+        
+        purchases.push({ 
+            id: data[0].id, date: data[0].purchase_date, fullDate: data[0].full_date, 
+            invoiceNo: data[0].invoice_no, supplier: data[0].supplier_name, total: data[0].total_cost
+        }); 
+        renderPurchaseHistory();
+        document.getElementById('add-purchase-form').reset();
+        alert(`Purchase from ${supplierName} (Invoice ${invoiceNo}) recorded.`);
+    }
+
+    function renderPurchaseHistory() {
+        const tableBody = document.getElementById('purchase-table')?.querySelector('tbody');
+        if (!tableBody) return; 
+        
+        tableBody.innerHTML = ''; 
+        const sortedPurchases = [...purchases].sort((a, b) => new Date(b.fullDate) - new Date(a.fullDate));
+
+        sortedPurchases.forEach(item => {
+            const row = tableBody.insertRow();
+            row.innerHTML = `
+                <td>${item.date}</td>
+                <td>${item.invoiceNo}</td>
+                <td>${item.supplier}</td>
+                <td>${parseFloat(item.total).toFixed(2)}</td>
+                <td><button onclick="deletePurchase(${item.id})" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button></td>
+            `;
+        });
+    }
+
+    async function deletePurchase(id) {
+        if (!confirm("Are you sure you want to delete this purchase record?")) return;
+        
+        const { error } = await supabase
+            .from('purchases')
+            .delete()
+            .eq('id', id); 
+
+        if (error) {
+            console.error("Error deleting purchase:", error);
+            return alert("Failed to delete purchase. Check console.");
+        }
+
+        purchases = purchases.filter(item => item.id !== id);
+        renderPurchaseHistory();
+        renderDashboard();
+        alert("Purchase record deleted.");
+    }
+
+
+    async function handleAddExpense(event) {
+        event.preventDefault();
+
+        const category = document.getElementById('expense-category')?.value;
+        const date = document.getElementById('expense-date')?.value;
+        const amount = parseFloat(document.getElementById('expense-amount')?.value);
+        const description = document.getElementById('expense-description')?.value.trim();
+        const fullDate = new Date().toISOString();
+
+        if (!category || isNaN(amount) || amount <= 0) return alert("Please select a category and enter a valid amount.");
+
+        const newExpense = {
+            category: category, expense_date: date, full_date: fullDate,
+            amount: amount, description: description
+        };
+
+        const { data, error } = await supabase
+            .from('expenses')
+            .insert([newExpense])
+            .select();
+
+        if (error) {
+            console.error("Error adding expense:", error);
+            return alert("Failed to record expense. Check console.");
+        }
+
+        expenses.push({ 
+            id: data[0].id, date: data[0].expense_date, fullDate: data[0].full_date, 
+            category: data[0].category, amount: data[0].amount, description: data[0].description
+        });
+        renderExpenseHistory();
+        document.getElementById('add-expense-form').reset();
+        alert(`Expense (${category}) of ${amount.toFixed(2)} PKR recorded.`);
+        renderDashboard();
+    }
+
+    function renderExpenseHistory() {
+        const tableBody = document.getElementById('expense-table')?.querySelector('tbody');
+        if (!tableBody) return; 
+        
+        tableBody.innerHTML = ''; 
+        const sortedExpenses = [...expenses].sort((a, b) => new Date(b.fullDate) - new Date(a.fullDate));
+
+        sortedExpenses.forEach(item => {
+            const row = tableBody.insertRow();
+            row.innerHTML = `
+                <td>${item.date}</td>
+                <td>${item.category}</td>
+                <td>${parseFloat(item.amount).toFixed(2)}</td>
+                <td>${item.description}</td>
+                <td><button onclick="deleteExpense(${item.id})" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button></td>
+            `;
+        });
+    }
+
+    async function deleteExpense(id) {
+        if (!confirm("Are you sure you want to delete this expense record?")) return;
+
+        const { error } = await supabase
+            .from('expenses')
+            .delete()
+            .eq('id', id); 
+
+        if (error) {
+            console.error("Error deleting expense:", error);
+            return alert("Failed to delete expense. Check console.");
+        }
+        
+        expenses = expenses.filter(item => item.id !== id);
+        renderExpenseHistory();
+        renderDashboard();
+        alert("Expense record deleted.");
+    }
+
+
+    // --- REPORT LOGIC (Relies on updated local arrays) ---
+    let currentReportType = 'sales-report';
+
+    function applyReportFilter() {
+        currentFilterStartDate = document.getElementById('report-start-date').value;
+        currentFilterEndDate = document.getElementById('report-end-date').value;
+        
+        if (!currentFilterStartDate || !currentFilterEndDate) return alert("Please select both start and end dates.");
+        
+        renderReports(currentReportType);
+    }
+
+    function renderReports(reportType) {
+        currentReportType = reportType;
+        const contentDiv = document.getElementById('report-content');
+        
+        document.querySelectorAll('.report-btn').forEach(btn => btn.classList.remove('active-report'));
+        document.querySelector(`.report-tabs button[onclick="renderReports('${reportType}')"]`)?.classList.add('active-report');
+
+
+        if (!currentFilterStartDate || !currentFilterEndDate) {
+            contentDiv.innerHTML = '<p class="alert alert-warning">Please apply a date filter first.</p>';
+            return;
+        }
+
+        // Filter data based on selected range
+        const filteredSales = sales.filter(s => dateInRange(s.date, currentFilterStartDate, currentFilterEndDate));
+        
+        let html = `<h4>Report: ${reportType.replace('-', ' ').toUpperCase()} (From ${currentFilterStartDate} to ${currentFilterEndDate})</h4>`;
+        html += `<button class="btn btn-sm btn-secondary float-end no-print" onclick="window.print()"><i class="fas fa-print"></i> Print Report</button>`;
+        
+        if (reportType === 'sales-report') {
+            let totalRevenue = 0;
+            let totalRefund = 0;
+
+            html += `<div class="table-responsive"><table class="table table-bordered table-striped table-sm mt-3">
+                <thead class="table-danger"><tr><th>Invoice ID</th><th>Date</th><th>Type</th><th>Total (PKR)</th><th>Customer</th><th>Details</th></tr></thead><tbody>`;
+
+            filteredSales.sort((a, b) => new Date(b.fullDate) - new Date(a.fullDate)).forEach(sale => {
+                const typeBadge = sale.type === 'Refund' ? '<span class="badge bg-danger">Refund</span>' : '<span class="badge bg-success">Sale</span>';
+                const amountDisplay = Math.abs(sale.total).toFixed(2);
+                
+                if (sale.type === 'Sale') totalRevenue += sale.total;
+                if (sale.type === 'Refund') totalRefund += Math.abs(sale.total);
+
+                html += `<tr>
+                    <td>${sale.invoice}</td>
+                    <td>${sale.date}</td>
+                    <td>${typeBadge}</td>
+                    <td class="${sale.type === 'Refund' ? 'text-danger fw-bold' : 'text-success fw-bold'}">${amountDisplay}</td>
+                    <td>${sale.customerName || 'N/A'}</td>
+                    <td><button class="btn btn-sm btn-info" onclick="alert('Items: ' + JSON.stringify(sales.find(s => s.invoice === ${sale.invoice}).items, null, 2))"><i class="fas fa-info-circle"></i></button></td>
+                </tr>`;
+            });
+            
+            html += `</tbody></table></div>`;
+            html += `<div class="alert alert-primary mt-3">
+                <strong>SUMMARY:</strong> 
+                Total Sales Revenue: ${totalRevenue.toFixed(2)} PKR | 
+                Total Refunds: ${totalRefund.toFixed(2)} PKR |
+                Net Revenue: ${(totalRevenue - totalRefund).toFixed(2)} PKR
+            </div>`;
+
+        } else if (reportType === 'profit-report') {
+            let totalGrossProfit = 0;
+            let totalExpenses = 0;
+
+            filteredSales.forEach(sale => {
+                totalGrossProfit += sale.profit;
+            });
+            
+            const filteredExpenses = expenses.filter(e => dateInRange(e.date, currentFilterStartDate, currentFilterEndDate));
+            filteredExpenses.forEach(exp => {
+                totalExpenses += exp.amount;
+            });
+
+            const netProfit = totalGrossProfit - totalExpenses;
+
+            html += `
+                <div class="row g-4 mt-3">
+                    <div class="col-md-4"><div class="card bg-success text-white p-3"><h5>Gross Profit from Sales/Refunds</h5><h2 class="display-6">${totalGrossProfit.toFixed(2)} PKR</h2></div></div>
+                    <div class="col-md-4"><div class="card bg-danger text-white p-3"><h5>Total Operating Expenses</h5><h2 class="display-6">${totalExpenses.toFixed(2)} PKR</h2></div></div>
+                    <div class="col-md-4"><div class="card bg-primary text-white p-3"><h5>Net Profit (Gross - Expenses)</h5><h2 class="display-6">${netProfit.toFixed(2)} PKR</h2></div></div>
+                </div>
+            `;
+
+            html += `<h5 class="mt-4">Expense Details</h5>
+                <div class="table-responsive"><table class="table table-bordered table-striped table-sm">
+                <thead class="table-danger"><tr><th>Date</th><th>Category</th><th>Amount (PKR)</th><th>Description</th></tr></thead><tbody>`;
+            
+            filteredExpenses.forEach(exp => {
+                html += `<tr><td>${exp.date}</td><td>${exp.category}</td><td>${exp.amount.toFixed(2)}</td><td>${exp.description}</td></tr>`;
+            });
+
+            html += `</tbody></table></div>`;
+
+        } else if (reportType === 'expiry-report') {
+            const today = new Date(new Date().toISOString().split('T')[0]);
+            const upcomingDate = new Date();
+            upcomingDate.setDate(today.getDate() + 90); // Next 90 days
+
+            const expiringSoon = inventory.filter(item => {
+                const expiry = new Date(item.expiry);
+                return expiry > today && expiry <= upcomingDate;
+            }).sort((a, b) => new Date(a.expiry) - new Date(b.expiry));
+
+            const expired = inventory.filter(item => new Date(item.expiry) < today);
+
+            html += `<h5 class="mt-3 text-danger"><i class="fas fa-exclamation-triangle"></i> Expired Stock (Count: ${expired.length})</h5>`;
+            if (expired.length > 0) {
+                html += `<div class="table-responsive"><table class="table table-bordered table-sm">
+                    <thead class="table-dark"><tr><th>Name</th><th>Batch No.</th><th>Expiry Date</th><th>Stock</th><th>Cost Value</th></tr></thead><tbody>`;
+                expired.forEach(item => {
+                    html += `<tr class="expired-row">
+                        <td>${item.name}</td><td>${item.batch}</td><td>${item.expiry}</td><td>${item.stock}</td><td>${(item.stock * item.cost).toFixed(2)}</td>
+                    </tr>`;
+                });
+                html += `</tbody></table></div>`;
+            } else {
+                html += '<p class="alert alert-info">No expired stock found.</p>';
+            }
+
+
+            html += `<h5 class="mt-5 text-warning"><i class="fas fa-calendar-alt"></i> Expiring within 90 Days (Count: ${expiringSoon.length})</h5>`;
+            if (expiringSoon.length > 0) {
+                 html += `<div class="table-responsive"><table class="table table-bordered table-sm">
+                    <thead class="table-dark"><tr><th>Name</th><th>Batch No.</th><th>Expiry Date</th><th>Days Left</th><th>Stock</th></tr></thead><tbody>`;
+                expiringSoon.forEach(item => {
+                    const daysLeft = Math.ceil((new Date(item.expiry) - today) / (1000 * 60 * 60 * 24));
+                    html += `<tr class="soon-to-expire-row">
+                        <td>${item.name}</td><td>${item.batch}</td><td>${item.expiry}</td><td>${daysLeft}</td><td>${item.stock}</td>
+                    </tr>`;
+                });
+                html += `</tbody></table></div>`;
+            } else {
+                html += '<p class="alert alert-info">No stock expiring in the next 90 days.</p>';
+            }
+        }
+
+        contentDiv.innerHTML = html;
+    }
+
+
+    // =================================================================
+    // --- 8. INITIALIZATION ---
+    // =================================================================
+
+    document.addEventListener('DOMContentLoaded', () => {
+        // loadData will call initPOS()
+        loadData();
+        
+        document.getElementById('add-product-form')?.addEventListener('submit', handleAddProduct);
+        document.getElementById('add-supplier-form')?.addEventListener('submit', handleAddSupplier);
+        document.getElementById('add-purchase-form')?.addEventListener('submit', handleAddPurchase);
+        document.getElementById('add-expense-form')?.addEventListener('submit', handleAddExpense);
+        
+        document.querySelectorAll('.tabs button').forEach(button => {
+            button.addEventListener('click', () => {
+                showScreen(button.dataset.target);
+            });
+        });
+        
+        document.querySelectorAll('.dashboard-card').forEach(card => {
+            card.addEventListener('click', () => {
+                const target = card.dataset.target;
+                if(target) showScreen(target);
+            });
+        });
+    });
+
+</script>
+
+</body>
+</html>
